@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -9,6 +10,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as path;
+import 'package:firebase_storage/firebase_storage.dart'; // Firebase Storageのインポート
 
 import 'AppBarWidget.dart';
 import 'BottomNavBar.dart';
@@ -31,7 +33,6 @@ class _AddItemPageState extends State<AddItemPage> {
   void initState() {
     super.initState();
     _initDatabase();
-    _loadItemsFromDatabase();
   }
 
   Future<void> _initDatabase() async {
@@ -44,6 +45,7 @@ class _AddItemPageState extends State<AddItemPage> {
       },
       version: 1,
     );
+    _loadItemsFromDatabase();
   }
 
   Future<void> _insertItem(String imagePath, [String tags = ""]) async {
@@ -69,10 +71,50 @@ class _AddItemPageState extends State<AddItemPage> {
     final pickedFile = await picker.pickImage(source: source);
 
     if (pickedFile != null) {
-      _saveImage(File(pickedFile.path));
+      _confirmSaveImage(File(pickedFile.path));
     } else {
       print('No image selected.');
     }
+  }
+
+  Future<void> _confirmSaveImage(File image) async {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('確認'),
+          content: Text('この画像を保存しますか？'),
+          actions: <Widget>[
+            TextButton(
+              child: Text('いいえ'),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+            ),
+            TextButton(
+              child: Text('はい'),
+              onPressed: () {
+                Navigator.of(context).pop();
+                _saveImage(image);
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // 画像を削除するメソッド
+  Future<void> _deleteImage(int index) async {
+    final imagePath = _items[index].path;
+    await db.delete('items', where: 'imagePath = ?', whereArgs: [imagePath]);
+    setState(() {
+      _items.removeAt(index);
+    });
+    final storageRef = FirebaseStorage.instance
+        .ref()
+        .child('images/${path.basename(imagePath)}');
+    await storageRef.delete(); // Firebase Storageからも削除
   }
 
   Future<void> _saveImage(File image) async {
@@ -83,6 +125,20 @@ class _AddItemPageState extends State<AddItemPage> {
       _items.add(localImage);
     });
     await _insertItem(localImage.path);
+    await _uploadToFirebase(localImage);
+  }
+
+  Future<void> _uploadToFirebase(File image) async {
+    try {
+      final storageRef = FirebaseStorage.instance
+          .ref()
+          .child('images/${image.path.split('/').last}');
+      await storageRef.putFile(image);
+      String downloadURL = await storageRef.getDownloadURL();
+      print('Image uploaded: $downloadURL');
+    } catch (e) {
+      print('Error uploading image: $e');
+    }
   }
 
   Future<void> _processBarcodeImage() async {
@@ -108,6 +164,7 @@ class _AddItemPageState extends State<AddItemPage> {
       );
       if (croppedFile != null) {
         _saveImage(File(croppedFile.path));
+        Navigator.of(context).pop(); // 戻る処理を追加
       }
     }
   }
@@ -182,100 +239,39 @@ class _AddItemPageState extends State<AddItemPage> {
   }
 
   Future<List<Map<String, String>>> _getSearchSuggestions(String query) async {
-    // Implement search suggestion fetching logic here
-    // For example, using an API to get suggestions based on the query
-    // Returning static suggestions for now
-    return [
-      {'name': '検索結果1', 'url': 'https://example.com/search1'},
-      {'name': '検索結果2', 'url': 'https://example.com/search2'},
-      {'name': '検索結果3', 'url': 'https://example.com/search3'},
-    ];
+    final response = await http.get(Uri.parse(
+        'https://www.googleapis.com/customsearch/v1?key=YOUR_GOOGLE_API_KEY&cx=YOUR_CX&q=$query'));
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      List<Map<String, String>> suggestions = [];
+      for (var item in data['items']) {
+        suggestions.add({
+          'name': item['title'],
+          'url': item['link'],
+        });
+      }
+      return suggestions;
+    } else {
+      return [];
+    }
   }
 
   Future<void> _navigateToWebPage(BuildContext context, String url) async {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => WebPage(
-            url: url,
-            onImageSelected: (imageUrl) {
-              _saveImageFromUrl(imageUrl);
-            }),
+          url: url,
+          onImageSelected: _handleImageSelectedFromWeb,
+        ),
       ),
     );
   }
 
-  Future<void> _saveImageFromUrl(String imageUrl) async {
-    try {
-      final response = await http.get(Uri.parse(imageUrl));
-      if (response.statusCode == 200) {
-        final directory = await getApplicationDocumentsDirectory();
-        final file = File('${directory.path}/${imageUrl.split('/').last}');
-        await file.writeAsBytes(response.bodyBytes);
-        final croppedFile = await ImageCropper().cropImage(
-          sourcePath: file.path,
-          aspectRatioPresets: [CropAspectRatioPreset.square],
-          uiSettings: [
-            AndroidUiSettings(
-              toolbarTitle: '背景を切り取る',
-              toolbarColor: Colors.deepOrange,
-              toolbarWidgetColor: Colors.white,
-              initAspectRatio: CropAspectRatioPreset.original,
-              lockAspectRatio: false,
-            ),
-            IOSUiSettings(
-              minimumAspectRatio: 1.0,
-            ),
-          ],
-        );
-        if (croppedFile != null) {
-          _saveImage(File(croppedFile.path));
-        }
-      }
-    } catch (e) {
-      print('Error saving image: $e');
-    }
+  void _handleImageSelectedFromWeb(String imageUrl) async {
+    await _saveImageFromUrl(imageUrl); // 追加：非同期処理の完了を待機
   }
 
-  Future<void> _pickImageFromWeb(BuildContext context) async {
-    _showWebImageModal(context);
-  }
-
-  Future<void> _deleteImage(File image) async {
-    final imagePath = image.path;
-    await db.delete('items', where: 'imagePath = ?', whereArgs: [imagePath]);
-    setState(() {
-      _items.remove(image);
-    });
-  }
-
-  void _confirmDeleteImage(File image) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('確認'),
-          content: Text('この画像を削除しますか？'),
-          actions: <Widget>[
-            TextButton(
-              child: Text('いいえ'),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
-            TextButton(
-              child: Text('はい'),
-              onPressed: () {
-                Navigator.of(context).pop();
-                _deleteImage(image);
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  void _confirmAddImage(File image) {
+  Future<void> _confirmSaveImageFromWeb(String imageUrl) async {
     showDialog(
       context: context,
       builder: (BuildContext context) {
@@ -293,7 +289,7 @@ class _AddItemPageState extends State<AddItemPage> {
               child: Text('はい'),
               onPressed: () {
                 Navigator.of(context).pop();
-                getImage(ImageSource.gallery);
+                _saveImageFromUrl(imageUrl);
               },
             ),
           ],
@@ -302,37 +298,62 @@ class _AddItemPageState extends State<AddItemPage> {
     );
   }
 
-  Future<void> _addTagToImage(File image) async {
-    TextEditingController tagController = TextEditingController();
+  Future<String> getLocalFilePath() async {
+    final directory = await getApplicationDocumentsDirectory();
+    return directory.path;
+  }
+
+  Future<void> _saveImageFromUrl(String imageUrl) async {
+    try {
+      // Check if imageUrl is a local file path
+      if (imageUrl.startsWith('http') || imageUrl.startsWith('https')) {
+        final response = await http.get(Uri.parse(imageUrl));
+        if (response.statusCode == 200) {
+          final directory = await getApplicationDocumentsDirectory();
+          final file = File('${directory.path}/${imageUrl.split('/').last}');
+          await file.writeAsBytes(response.bodyBytes);
+          setState(() {
+            _items.add(file);
+          });
+          await _insertItem(file.path);
+          await _uploadToFirebase(file);
+        } else {
+          print('Failed to download image');
+        }
+      } else {
+        // If imageUrl is a local file path, directly use it
+        final file = File(imageUrl);
+        setState(() {
+          _items.add(file);
+        });
+        await _insertItem(file.path);
+        await _uploadToFirebase(file);
+      }
+    } catch (e) {
+      print('Error saving image from URL: $e');
+    }
+  }
+
+  // 画像削除の確認ポップアップを表示するメソッド
+  void _confirmDeleteImage(BuildContext context, int index) {
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: Text('タグを追加'),
-          content: TextField(
-            controller: tagController,
-            decoration: InputDecoration(labelText: 'タグ'),
-          ),
+          title: Text('確認'),
+          content: Text('この画像を削除しますか？'),
           actions: <Widget>[
             TextButton(
-              child: Text('キャンセル'),
+              child: Text('いいえ'),
               onPressed: () {
                 Navigator.of(context).pop();
               },
             ),
             TextButton(
-              child: Text('追加'),
-              onPressed: () async {
-                final tag = tagController.text;
-                if (tag.isNotEmpty) {
-                  await db.update(
-                    'items',
-                    {'tags': tag},
-                    where: 'imagePath = ?',
-                    whereArgs: [image.path],
-                  );
-                }
+              child: Text('はい'),
+              onPressed: () {
                 Navigator.of(context).pop();
+                _deleteImage(index);
               },
             ),
           ],
@@ -344,89 +365,68 @@ class _AddItemPageState extends State<AddItemPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBarWidget(title: 'アイテムを追加'),
+      appBar: AppBar(
+        title: Text(
+          'アイテムを追加',
+          style: GoogleFonts.getFont('Kosugi Maru', fontSize: 20),
+        ),
+      ),
       body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(
             child: GridView.builder(
-              padding: EdgeInsets.all(10),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 10,
-              ),
+              padding: const EdgeInsets.all(10.0),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 8.0,
+                  mainAxisSpacing: 8.0),
               itemCount: _items.length,
               itemBuilder: (BuildContext context, int index) {
-                final item = _items[index];
-                return Stack(
-                  children: [
-                    GestureDetector(
-                      onLongPress: () => _confirmDeleteImage(item),
-                      child: Image.file(item, fit: BoxFit.cover),
-                    ),
-                    Positioned(
-                      top: 5,
-                      right: 5,
-                      child: IconButton(
-                        icon: Icon(Icons.delete, color: Colors.red),
-                        onPressed: () => _confirmDeleteImage(item),
+                return GestureDetector(
+                  onTap: () {
+                    // Implement your logic to handle item tap
+                  },
+                  child: Stack(
+                    children: [
+                      Image.file(
+                        _items[index],
+                        fit: BoxFit.cover,
                       ),
-                    ),
-                    Positioned(
-                      bottom: 5,
-                      right: 5,
-                      child: IconButton(
-                        icon: Icon(Icons.label, color: Colors.blue),
-                        onPressed: () => _addTagToImage(item),
+                      Positioned(
+                        top: 0,
+                        right: 0,
+                        child: IconButton(
+                          icon: Icon(Icons.delete),
+                          color: Colors.red,
+                          onPressed: () => _confirmDeleteImage(context, index),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 );
               },
             ),
           ),
           Padding(
-            padding: EdgeInsets.all(20),
+            padding: const EdgeInsets.all(8.0),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                ElevatedButton(
+                ElevatedButton.icon(
                   onPressed: () => getImage(ImageSource.gallery),
-                  child: Text('画像選択'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blue,
-                    padding: EdgeInsets.symmetric(horizontal: 40, vertical: 15),
-                    textStyle: TextStyle(fontSize: 18),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
+                  icon: Icon(Icons.add),
+                  label: Text('画像を追加'),
                 ),
-                SizedBox(height: 10),
-                ElevatedButton(
-                  onPressed: () => getImage(ImageSource.camera),
-                  child: Text('撮る'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange,
-                    padding: EdgeInsets.symmetric(horizontal: 40, vertical: 15),
-                    textStyle: TextStyle(fontSize: 18),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
+                ElevatedButton.icon(
+                  onPressed: _processBarcodeImage,
+                  icon: Icon(Icons.camera_alt),
+                  label: Text('カメラから追加'),
                 ),
-                SizedBox(height: 10),
-                ElevatedButton(
-                  onPressed: () => _pickImageFromWeb(context),
-                  child: Text('Web画像選択'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.purple,
-                    padding: EdgeInsets.symmetric(horizontal: 40, vertical: 15),
-                    textStyle: GoogleFonts.montserrat(fontSize: 18),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(30),
-                    ),
-                  ),
+                ElevatedButton.icon(
+                  onPressed: () => _showWebImageModal(context),
+                  icon: Icon(Icons.web),
+                  label: Text('WEBから画像を追加'),
                 ),
               ],
             ),
@@ -629,11 +629,29 @@ class _WebPageState extends State<WebPage> {
         if (croppedFile != null) {
           final croppedImage = File(croppedFile.path);
           widget.onImageSelected(croppedImage.path);
-          Navigator.of(context).pop();
+          Navigator.of(context).pop(); // 画像を切り取った後にダイアログを閉じる
         }
       }
     } catch (e) {
       print('Error saving image: $e');
+      // エラーハンドリングを追加
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('エラー'),
+            content: Text('画像の保存中にエラーが発生しました。もう一度お試しください。'),
+            actions: <Widget>[
+              TextButton(
+                child: Text('閉じる'),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+            ],
+          );
+        },
+      );
     }
   }
 }

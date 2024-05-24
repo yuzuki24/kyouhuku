@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "495947520541",
+    "project_id": "kyouhuku",
+    "storage_bucket": "kyouhuku.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:495947520541:android:8d381007c8f5baea0a84f4",
+        "android_client_info": {
+          "package_name": "com.example.kyouhuku"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDEqu44ZHXVCPyjT83RBTq8A-csZ2wSsqc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

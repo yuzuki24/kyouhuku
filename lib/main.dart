@@ -11,9 +11,11 @@ import 'pages/UserRegistrationPage.dart';
 import 'pages/ClothesSearchPage.dart';
 import 'pages/AddItemPage.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:firebase_core/firebase_core.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized(); // 追加
+  await Firebase.initializeApp();
   runApp(const MyApp());
 }
 
